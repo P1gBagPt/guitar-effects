@@ -1,6 +1,6 @@
 <script lang="ts">
   import { audioState } from '../stores/audioState.svelte';
-  import { X, Cpu, Volume2, Mic, Activity, AlertCircle } from 'lucide-svelte';
+  import { X, Cpu, Volume2, Mic, Activity, AlertCircle, Sliders } from 'lucide-svelte';
 
   let { onClose = () => {} } = $props<{ onClose?: () => void }>();
 
@@ -93,6 +93,79 @@
             </option>
           {/each}
         </select>
+      </div>
+
+      <!-- Guitar Input Channel / Routing -->
+      <div class="setting-row">
+        <label for="input-channel-group">
+          <Sliders size={14} /> Guitar Input Jack / Channel
+        </label>
+        <div class="channel-toggle-group" id="input-channel-group">
+          <button
+            type="button"
+            class="chan-btn"
+            class:active={audioState.inputChannel === 0}
+            onclick={() => audioState.setInputChannel(0)}
+          >
+            Input 1 (Left)
+          </button>
+          <button
+            type="button"
+            class="chan-btn"
+            class:active={audioState.inputChannel === 1}
+            onclick={() => audioState.setInputChannel(1)}
+          >
+            Input 2 (Right / Guitar)
+          </button>
+          <button
+            type="button"
+            class="chan-btn"
+            class:active={audioState.inputChannel === 2}
+            onclick={() => audioState.setInputChannel(2)}
+          >
+            Both (Auto / Mix)
+          </button>
+        </div>
+        <span class="helper-text">
+          Focusrite Scarlett: Placed in Inst / Jack 2? Select <strong>Input 2</strong> or <strong>Both</strong>.
+        </span>
+      </div>
+
+      <!-- Live Input Meter / Signal Test Card -->
+      <div class="signal-test-card">
+        <div class="signal-test-header">
+          <span class="signal-test-title">Real-Time DI Signal Activity (Pluck Guitar)</span>
+          <span class="signal-status-pill" class:active={audioState.inputActive}>
+            {audioState.inputActive ? 'Input Capturing' : 'Input Inactive'}
+          </span>
+        </div>
+        <div class="meter-bars-row">
+          <div class="meter-bar-item">
+            <span class="bar-name">In 1</span>
+            <div class="meter-h-track">
+              <div
+                class="meter-h-fill"
+                style="width: {Math.max(0, Math.min(100, ((audioState.inputCh1PeakDb + 60) / 60) * 100))}%;"
+              ></div>
+            </div>
+            <span class="bar-val">{audioState.inputCh1PeakDb.toFixed(0)} dB</span>
+          </div>
+          <div class="meter-bar-item">
+            <span class="bar-name">In 2</span>
+            <div class="meter-h-track">
+              <div
+                class="meter-h-fill"
+                style="width: {Math.max(0, Math.min(100, ((audioState.inputCh2PeakDb + 60) / 60) * 100))}%;"
+              ></div>
+            </div>
+            <span class="bar-val">{audioState.inputCh2PeakDb.toFixed(0)} dB</span>
+          </div>
+        </div>
+        {#if audioState.inputError}
+          <div class="input-warn-text">
+            Notice: {audioState.inputError}
+          </div>
+        {/if}
       </div>
 
       <!-- Output Device -->
@@ -335,6 +408,131 @@
     font-weight: 700;
     cursor: pointer;
     box-shadow: 0 2px 8px rgba(255, 107, 53, 0.4);
+  }
+
+  .channel-toggle-group {
+    display: flex;
+    gap: 8px;
+  }
+
+  .chan-btn {
+    flex: 1;
+    background: #14161a;
+    border: 1px solid #2e3340;
+    color: #abb2bf;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .chan-btn:hover {
+    border-color: #4b5263;
+    color: #fff;
+  }
+
+  .chan-btn.active {
+    background: rgba(255, 107, 53, 0.15);
+    border-color: var(--accent-orange, #ff6b35);
+    color: var(--accent-orange, #ff6b35);
+  }
+
+  .helper-text {
+    font-size: 11px;
+    color: #7f848e;
+    line-height: 1.4;
+  }
+
+  .signal-test-card {
+    background: #131519;
+    border: 1px solid #242730;
+    border-radius: 8px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .signal-test-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .signal-test-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #abb2bf;
+  }
+
+  .signal-status-pill {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #252832;
+    color: #7f848e;
+    font-weight: 600;
+  }
+
+  .signal-status-pill.active {
+    background: rgba(46, 204, 113, 0.15);
+    color: #2ecc71;
+  }
+
+  .meter-bars-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .meter-bar-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .bar-name {
+    font-size: 11px;
+    font-weight: 600;
+    color: #9aa0a6;
+    width: 28px;
+  }
+
+  .meter-h-track {
+    flex: 1;
+    height: 8px;
+    background: #0d0e11;
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+    border: 1px solid #1f2229;
+  }
+
+  .meter-h-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #2ecc71 0%, #f1c40f 80%, #e74c3c 100%);
+    border-radius: 3px;
+    transition: width 0.04s linear;
+  }
+
+  .bar-val {
+    font-size: 11px;
+    font-family: monospace;
+    color: #7f848e;
+    width: 44px;
+    text-align: right;
+  }
+
+  .input-warn-text {
+    font-size: 11px;
+    color: #e67e22;
+    background: rgba(230, 126, 34, 0.1);
+    padding: 6px 10px;
+    border-radius: 4px;
   }
 
   .action-btn.running {

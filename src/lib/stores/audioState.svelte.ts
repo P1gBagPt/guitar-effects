@@ -6,7 +6,10 @@ class AudioState {
   selectedOutput = $state<string>('');
   sampleRate = $state<number>(48000);
   bufferSize = $state<number>(256);
+  inputChannel = $state<number>(2); // 0 = Ch 1, 1 = Ch 2, 2 = Both / Sum
   isEngineRunning = $state<boolean>(false);
+  inputActive = $state<boolean>(false);
+  inputError = $state<string | null>(null);
   errorMessage = $state<string | null>(null);
 
   // Volumes
@@ -26,6 +29,8 @@ class AudioState {
   // Decibel Meters
   inputPeakDb = $state<number>(-96);
   inputRmsDb = $state<number>(-96);
+  inputCh1PeakDb = $state<number>(-96);
+  inputCh2PeakDb = $state<number>(-96);
   outputPeakDb = $state<number>(-96);
   outputRmsDb = $state<number>(-96);
 
@@ -38,7 +43,12 @@ class AudioState {
         const defIn = this.hostInfo.input_devices.find((d) => d.is_default);
         if (defIn) this.selectedInput = defIn.name;
         const defOut = this.hostInfo.output_devices.find((d) => d.is_default);
-        if (defOut) this.selectedOutput = defOut.name;
+        if (defOut) {
+          this.selectedOutput = defOut.name;
+          if (defOut.sample_rates.length > 0 && !defOut.sample_rates.includes(this.sampleRate)) {
+            this.sampleRate = defOut.sample_rates[0];
+          }
+        }
       }
       try {
         await this.startEngine();
@@ -58,13 +68,23 @@ class AudioState {
         this.selectedInput || undefined,
         this.selectedOutput || undefined,
         this.sampleRate,
-        this.bufferSize
+        this.bufferSize,
+        this.inputChannel
       );
       this.isEngineRunning = true;
     } catch (err: any) {
       this.errorMessage = String(err);
       this.isEngineRunning = false;
       throw err;
+    }
+  }
+
+  async setInputChannel(channel: number) {
+    this.inputChannel = channel;
+    try {
+      await tauriApi.setInputChannel(channel);
+    } catch (e) {
+      console.warn('Could not set input channel dynamically:', e);
     }
   }
 
@@ -138,11 +158,19 @@ class AudioState {
         const tel: AudioTelemetry = await tauriApi.getAudioTelemetry();
         this.inputPeakDb = tel.input_peak_db;
         this.inputRmsDb = tel.input_rms_db;
+        this.inputCh1PeakDb = tel.input_ch1_peak_db;
+        this.inputCh2PeakDb = tel.input_ch2_peak_db;
         this.outputPeakDb = tel.output_peak_db;
         this.outputRmsDb = tel.output_rms_db;
         this.playheadSeconds = tel.playhead_seconds;
         this.isPlaying = tel.is_playing;
         this.isRecording = tel.is_recording;
+        this.inputActive = tel.input_active;
+        if (tel.input_error) {
+          this.inputError = tel.input_error;
+        } else {
+          this.inputError = null;
+        }
       } catch {
         // Fallback or simulated meters in preview mode
       }

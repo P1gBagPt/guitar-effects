@@ -15,18 +15,22 @@ use ringbuffer::create_audio_ringbuffer;
 use rtrb::Producer;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioTelemetry {
     pub input_peak_db: f32,
     pub input_rms_db: f32,
+    pub input_ch1_peak_db: f32,
+    pub input_ch2_peak_db: f32,
     pub output_peak_db: f32,
     pub output_rms_db: f32,
     pub playhead_seconds: f64,
     pub is_playing: bool,
     pub is_recording: bool,
+    pub input_active: bool,
+    pub input_error: Option<String>,
 }
 
 pub struct AudioEngine {
@@ -39,8 +43,14 @@ pub struct AudioEngine {
     // Telemetry atomics
     input_peak: Arc<AtomicF32>,
     input_rms: Arc<AtomicF32>,
+    input_ch1_peak: Arc<AtomicF32>,
+    input_ch2_peak: Arc<AtomicF32>,
     output_peak: Arc<AtomicF32>,
     output_rms: Arc<AtomicF32>,
+    input_active: Arc<AtomicBool>,
+    input_error: Arc<Mutex<Option<String>>>,
+    // Input channel selector (0 = Ch 1, 1 = Ch 2, 2 = Sum/Both)
+    input_channel: Arc<AtomicU32>,
     // Transport & Volumes
     guitar_volume: Arc<AtomicF32>,
     backing_volume: Arc<AtomicF32>,
@@ -72,8 +82,13 @@ impl AudioEngine {
             rec_producer: Arc::new(Mutex::new(None)),
             input_peak: Arc::new(AtomicF32::new(0.0)),
             input_rms: Arc::new(AtomicF32::new(0.0)),
+            input_ch1_peak: Arc::new(AtomicF32::new(0.0)),
+            input_ch2_peak: Arc::new(AtomicF32::new(0.0)),
             output_peak: Arc::new(AtomicF32::new(0.0)),
             output_rms: Arc::new(AtomicF32::new(0.0)),
+            input_active: Arc::new(AtomicBool::new(false)),
+            input_error: Arc::new(Mutex::new(None)),
+            input_channel: Arc::new(AtomicU32::new(2)), // Default: 2 (Sum/Both channels)
             guitar_volume: Arc::new(AtomicF32::new(1.0)),
             backing_volume: Arc::new(AtomicF32::new(1.0)),
             master_volume: Arc::new(AtomicF32::new(1.0)),
@@ -83,6 +98,14 @@ impl AudioEngine {
             backing_audio: Arc::new(Mutex::new(None)),
             dry_monitor: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn set_input_channel(&self, ch: u32) {
+        self.input_channel.store(ch, Ordering::Relaxed);
+    }
+
+    pub fn get_input_channel(&self) -> u32 {
+        self.input_channel.load(Ordering::Relaxed)
     }
 
     pub fn get_host_info(&self) -> AudioHostInfo {
@@ -163,6 +186,8 @@ impl AudioEngine {
 
         let in_peak = to_db(self.input_peak.load(Ordering::Relaxed));
         let in_rms = to_db(self.input_rms.load(Ordering::Relaxed));
+        let in_ch1_peak = to_db(self.input_ch1_peak.load(Ordering::Relaxed));
+        let in_ch2_peak = to_db(self.input_ch2_peak.load(Ordering::Relaxed));
         let out_peak = to_db(self.output_peak.load(Ordering::Relaxed));
         let out_rms = to_db(self.output_rms.load(Ordering::Relaxed));
 
@@ -173,11 +198,15 @@ impl AudioEngine {
         AudioTelemetry {
             input_peak_db: in_peak,
             input_rms_db: in_rms,
+            input_ch1_peak_db: in_ch1_peak,
+            input_ch2_peak_db: in_ch2_peak,
             output_peak_db: out_peak,
             output_rms_db: out_rms,
             playhead_seconds: playhead_secs,
             is_playing: self.is_playing.load(Ordering::Relaxed),
             is_recording: self.recorder.lock().is_recording(),
+            input_active: self.input_active.load(Ordering::Relaxed),
+            input_error: self.input_error.lock().clone(),
         }
     }
 
@@ -234,7 +263,8 @@ impl AudioEngine {
         self.pedal_chain.lock().prepare(active_sr as f32, buffer_size_samples as usize);
 
         // Ringbuffer for guitar DI signal
-        let (mut in_prod, mut out_cons) = create_audio_ringbuffer::<f32>(buffer_size_samples as usize * 16);
+        let (in_prod, mut out_cons) = create_audio_ringbuffer::<f32>(buffer_size_samples as usize * 16);
+        let in_prod_arc = Arc::new(Mutex::new(in_prod));
 
         // Output stream callback
         let pedal_chain_ref = self.pedal_chain.clone();
@@ -352,66 +382,275 @@ impl AudioEngine {
         out_stream.play().map_err(|e| format!("Failed to start output audio stream: {}", e))?;
         self.output_stream = Some(out_stream);
 
-        // 2. Input stream setup (OPTIONAL / FAIL-SOFT)
-        // If no input device or permission denied, output and backing track still work perfectly!
+        // 2. Input stream setup (Resilient sample rate negotiation & channel routing)
+        self.input_active.store(false, Ordering::SeqCst);
+        *self.input_error.lock() = None;
+
         if let Some(in_dev) = self.device_manager.find_input_device(input_device_name) {
+            let in_dev_name = in_dev.name().unwrap_or_else(|_| "Audio Input Device".to_string());
             if let Ok(default_in_cfg) = in_dev.default_input_config() {
-                let in_channels = default_in_cfg.channels() as usize;
-                let in_cfg = StreamConfig {
-                    channels: default_in_cfg.channels(),
-                    sample_rate: SampleRate(active_sr),
-                    buffer_size: BufferSize::Default,
-                };
+                let default_sr = default_in_cfg.sample_rate().0;
+                let in_channels_count = default_in_cfg.channels() as usize;
 
-                let in_peak_ref = self.input_peak.clone();
-                let in_rms_ref = self.input_rms.clone();
-
-                match in_dev.build_input_stream(
-                    &in_cfg,
-                    move |data: &[f32], _| {
-                        let mut peak = 0.0_f32;
-                        let mut sum_sq = 0.0_f32;
-
-                        for frame in data.chunks(in_channels) {
-                            let sample = frame[0]; // Channel 1 (Guitar DI / Mono Left)
-                            let abs = sample.abs();
-                            if abs > peak {
-                                peak = abs;
+                // Build list of candidate sample rates:
+                // Try active_sr first if supported; then fall back to default_sr.
+                let mut candidates = Vec::new();
+                if let Ok(supported_configs) = in_dev.supported_input_configs() {
+                    for c in supported_configs {
+                        if active_sr >= c.min_sample_rate().0 && active_sr <= c.max_sample_rate().0 {
+                            if !candidates.contains(&active_sr) {
+                                candidates.push(active_sr);
                             }
-                            sum_sq += sample * sample;
-                            let _ = in_prod.push(sample);
+                            break;
                         }
-
-                        let frames_len = data.len() / in_channels.max(1);
-                        let rms = (sum_sq / frames_len.max(1) as f32).sqrt();
-                        in_peak_ref.store(peak, Ordering::Relaxed);
-                        in_rms_ref.store(rms, Ordering::Relaxed);
-                    },
-                    |err| log::warn!("Audio input stream notice: {}", err),
-                    None,
-                ) {
-                    Ok(stream) => {
-                        if let Err(e) = stream.play() {
-                            log::warn!("Could not start input stream: {}", e);
-                        } else {
-                            self.input_stream = Some(stream);
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("Input stream unavailable (guitar DI bypassed, backing output active): {}", e);
                     }
                 }
+                if !candidates.contains(&default_sr) {
+                    candidates.push(default_sr);
+                }
+
+                let mut started_stream = None;
+                let mut stream_err = None;
+
+                for &candidate_sr in &candidates {
+                    let in_cfg = StreamConfig {
+                        channels: default_in_cfg.channels(),
+                        sample_rate: SampleRate(candidate_sr),
+                        buffer_size: BufferSize::Default,
+                    };
+
+                    let in_peak_ref = self.input_peak.clone();
+                    let in_rms_ref = self.input_rms.clone();
+                    let in_ch1_ref = self.input_ch1_peak.clone();
+                    let in_ch2_ref = self.input_ch2_peak.clone();
+                    let in_chan_mode = self.input_channel.clone();
+                    let in_prod_ref = in_prod_arc.clone();
+                    let mut resampler = LinearResampler::new(candidate_sr, active_sr);
+
+                    let res = match default_in_cfg.sample_format() {
+                        cpal::SampleFormat::F32 => in_dev.build_input_stream(
+                            &in_cfg,
+                            move |data: &[f32], _| {
+                                let mut prod_guard = in_prod_ref.lock();
+                                Self::process_input_frames::<f32>(
+                                    data,
+                                    in_channels_count,
+                                    &in_chan_mode,
+                                    &in_peak_ref,
+                                    &in_rms_ref,
+                                    &in_ch1_ref,
+                                    &in_ch2_ref,
+                                    &mut resampler,
+                                    &mut *prod_guard,
+                                    |&s| s,
+                                );
+                            },
+                            |err| log::warn!("Audio input stream error: {}", err),
+                            None,
+                        ),
+                        cpal::SampleFormat::I16 => in_dev.build_input_stream(
+                            &in_cfg,
+                            move |data: &[i16], _| {
+                                let mut prod_guard = in_prod_ref.lock();
+                                Self::process_input_frames::<i16>(
+                                    data,
+                                    in_channels_count,
+                                    &in_chan_mode,
+                                    &in_peak_ref,
+                                    &in_rms_ref,
+                                    &in_ch1_ref,
+                                    &in_ch2_ref,
+                                    &mut resampler,
+                                    &mut *prod_guard,
+                                    |&s| (s as f32) / 32768.0,
+                                );
+                            },
+                            |err| log::warn!("Audio input stream error: {}", err),
+                            None,
+                        ),
+                        cpal::SampleFormat::U16 => in_dev.build_input_stream(
+                            &in_cfg,
+                            move |data: &[u16], _| {
+                                let mut prod_guard = in_prod_ref.lock();
+                                Self::process_input_frames::<u16>(
+                                    data,
+                                    in_channels_count,
+                                    &in_chan_mode,
+                                    &in_peak_ref,
+                                    &in_rms_ref,
+                                    &in_ch1_ref,
+                                    &in_ch2_ref,
+                                    &mut resampler,
+                                    &mut *prod_guard,
+                                    |&s| ((s as f32) - 32768.0) / 32768.0,
+                                );
+                            },
+                            |err| log::warn!("Audio input stream error: {}", err),
+                            None,
+                        ),
+                        _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+                    };
+
+                    match res {
+                        Ok(stream) => {
+                            if let Err(e) = stream.play() {
+                                stream_err = Some(format!("Failed to start input stream: {}", e));
+                            } else {
+                                log::info!(
+                                    "Guitar DI input stream active on '{}' ({} Hz, format: {:?})",
+                                    in_dev_name,
+                                    candidate_sr,
+                                    default_in_cfg.sample_format()
+                                );
+                                started_stream = Some(stream);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            stream_err = Some(format!("Input config rejected ({} Hz): {}", candidate_sr, e));
+                        }
+                    }
+                }
+
+                if let Some(stream) = started_stream {
+                    self.input_stream = Some(stream);
+                    self.input_active.store(true, Ordering::SeqCst);
+                } else if let Some(err) = stream_err {
+                    log::warn!("Could not start input stream for '{}': {}", in_dev_name, err);
+                    *self.input_error.lock() = Some(err);
+                }
+            } else {
+                let err = format!("Could not read default input config for '{}'", in_dev_name);
+                log::warn!("{}", err);
+                *self.input_error.lock() = Some(err);
             }
+        } else {
+            let err = "No audio input device available".to_string();
+            log::warn!("{}", err);
+            *self.input_error.lock() = Some(err);
         }
 
         Ok(())
     }
 
+    fn process_input_frames<T: Copy>(
+        data: &[T],
+        in_channels: usize,
+        in_chan_mode: &AtomicU32,
+        in_peak_ref: &AtomicF32,
+        in_rms_ref: &AtomicF32,
+        in_ch1_ref: &AtomicF32,
+        in_ch2_ref: &AtomicF32,
+        resampler: &mut LinearResampler,
+        in_prod: &mut Producer<f32>,
+        to_f32: impl Fn(&T) -> f32,
+    ) {
+        let mode = in_chan_mode.load(Ordering::Relaxed);
+        let mut overall_peak = 0.0_f32;
+        let mut sum_sq = 0.0_f32;
+        let mut ch1_peak = 0.0_f32;
+        let mut ch2_peak = 0.0_f32;
+
+        let num_frames = data.len() / in_channels.max(1);
+
+        for frame in data.chunks(in_channels) {
+            let ch1 = frame.get(0).map(&to_f32).unwrap_or(0.0);
+            let ch2 = frame.get(1).map(&to_f32).unwrap_or(0.0);
+
+            let abs1 = ch1.abs();
+            let abs2 = ch2.abs();
+            if abs1 > ch1_peak {
+                ch1_peak = abs1;
+            }
+            if abs2 > ch2_peak {
+                ch2_peak = abs2;
+            }
+
+            let sample = match mode {
+                0 => ch1, // Channel 1 (Input 1 / Left)
+                1 => ch2, // Channel 2 (Input 2 / Right / Guitar)
+                _ => {
+                    // Mode 2 (Sum / Both)
+                    if in_channels > 1 {
+                        // If one channel is receiving guitar and other is idle/silent,
+                        // pass the active signal at full level (0 dB) for optimal signal-to-noise
+                        if abs1 > 0.0005 && abs2 < 0.0002 {
+                            ch1
+                        } else if abs2 > 0.0005 && abs1 < 0.0002 {
+                            ch2
+                        } else {
+                            (ch1 + ch2) * 0.707
+                        }
+                    } else {
+                        ch1
+                    }
+                }
+            };
+
+            let abs = sample.abs();
+            if abs > overall_peak {
+                overall_peak = abs;
+            }
+            sum_sq += sample * sample;
+
+            resampler.process(sample, |resampled| {
+                let _ = in_prod.push(resampled);
+            });
+        }
+
+        let rms = (sum_sq / num_frames.max(1) as f32).sqrt();
+        in_peak_ref.store(overall_peak, Ordering::Relaxed);
+        in_rms_ref.store(rms, Ordering::Relaxed);
+        in_ch1_ref.store(ch1_peak, Ordering::Relaxed);
+        in_ch2_ref.store(ch2_peak, Ordering::Relaxed);
+    }
+
     pub fn stop_engine(&mut self) {
         self.input_stream.take();
         self.output_stream.take();
+        self.input_active.store(false, Ordering::SeqCst);
     }
 }
+
+/// Ultra low-latency linear resampler for sample rate bridging
+struct LinearResampler {
+    in_sr: f64,
+    out_sr: f64,
+    phase: f64,
+    last_sample: f32,
+}
+
+impl LinearResampler {
+    fn new(in_sr: u32, out_sr: u32) -> Self {
+        Self {
+            in_sr: in_sr as f64,
+            out_sr: out_sr as f64,
+            phase: 0.0,
+            last_sample: 0.0,
+        }
+    }
+
+    #[inline]
+    fn process<F>(&mut self, curr_sample: f32, mut push_fn: F)
+    where
+        F: FnMut(f32),
+    {
+        if (self.in_sr - self.out_sr).abs() < 1.0 {
+            push_fn(curr_sample);
+            return;
+        }
+
+        let ratio = self.in_sr / self.out_sr;
+        while self.phase < 1.0 {
+            let interpolated = self.last_sample + (curr_sample - self.last_sample) * (self.phase as f32);
+            push_fn(interpolated);
+            self.phase += ratio;
+        }
+        self.phase -= 1.0;
+        self.last_sample = curr_sample;
+    }
+}
+
 
 
 
