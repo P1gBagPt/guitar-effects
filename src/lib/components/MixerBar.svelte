@@ -35,6 +35,32 @@
       <div class="channel-info">
         <Mic size={14} class="chan-icon" />
         <span class="channel-name">GUITAR</span>
+        <div class="mini-chan-selector">
+          <button
+            class="mini-btn"
+            class:active={audioState.inputChannel === 0}
+            onclick={() => audioState.setInputChannel(0)}
+            title="Focusrite Input 1 (Left / Mic 1 / Inst 1)"
+          >
+            IN 1
+          </button>
+          <button
+            class="mini-btn"
+            class:active={audioState.inputChannel === 1}
+            onclick={() => audioState.setInputChannel(1)}
+            title="Focusrite Input 2 (Right / Guitar / Inst 2)"
+          >
+            IN 2
+          </button>
+          <button
+            class="mini-btn"
+            class:active={audioState.inputChannel === 2}
+            onclick={() => audioState.setInputChannel(2)}
+            title="Both Inputs (Auto / Sum)"
+          >
+            ALL
+          </button>
+        </div>
       </div>
 
       <!-- Meter & Fader Pair -->
@@ -218,6 +244,37 @@
     font-weight: 700;
     letter-spacing: 0.5px;
     color: #abb2bf;
+  }
+
+  .mini-chan-selector {
+    display: flex;
+    gap: 2px;
+    background: #111317;
+    padding: 2px;
+    border-radius: 4px;
+    border: 1px solid #282c35;
+  }
+
+  .mini-btn {
+    background: transparent;
+    border: none;
+    color: #6a7180;
+    font-size: 8px;
+    font-weight: 700;
+    padding: 2px 4px;
+    border-radius: 2px;
+    cursor: pointer;
+    line-height: 1;
+    transition: all 0.12s ease;
+  }
+
+  .mini-btn:hover {
+    color: #fff;
+  }
+
+  .mini-btn.active {
+    background: var(--accent-orange, #ff6b35);
+    color: #fff;
   }
 
   .fader-meter-row {

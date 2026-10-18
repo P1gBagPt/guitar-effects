@@ -35,11 +35,15 @@ export interface PedalMeta {
 export interface AudioTelemetry {
   input_peak_db: number;
   input_rms_db: number;
+  input_ch1_peak_db: number;
+  input_ch2_peak_db: number;
   output_peak_db: number;
   output_rms_db: number;
   playhead_seconds: number;
   is_playing: boolean;
   is_recording: boolean;
+  input_active: boolean;
+  input_error?: string | null;
 }
 
 export const tauriApi = {
@@ -51,14 +55,24 @@ export const tauriApi = {
     inputDevice?: string,
     outputDevice?: string,
     sampleRate: number = 48000,
-    bufferSize: number = 256
+    bufferSize: number = 256,
+    inputChannel: number = 2
   ): Promise<void> {
     return await invoke('start_audio_engine', {
       inputDevice: inputDevice ?? null,
       outputDevice: outputDevice ?? null,
       sampleRate,
       bufferSize,
+      inputChannel,
     });
+  },
+
+  async setInputChannel(channel: number): Promise<void> {
+    return await invoke('set_input_channel', { channel });
+  },
+
+  async getInputChannel(): Promise<number> {
+    return await invoke<number>('get_input_channel');
   },
 
   async stopAudioEngine(): Promise<void> {

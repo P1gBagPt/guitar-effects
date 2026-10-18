@@ -27,13 +27,28 @@ fn start_audio_engine(
     output_device: Option<String>,
     sample_rate: u32,
     buffer_size: u32,
+    input_channel: Option<u32>,
 ) -> Result<(), String> {
-    state.audio_engine.lock().start_engine(
+    let mut eng = state.audio_engine.lock();
+    if let Some(ch) = input_channel {
+        eng.set_input_channel(ch);
+    }
+    eng.start_engine(
         input_device.as_deref(),
         output_device.as_deref(),
         sample_rate,
         buffer_size,
     )
+}
+
+#[tauri::command]
+fn set_input_channel(state: State<'_, AppState>, channel: u32) {
+    state.audio_engine.lock().set_input_channel(channel);
+}
+
+#[tauri::command]
+fn get_input_channel(state: State<'_, AppState>) -> u32 {
+    state.audio_engine.lock().get_input_channel()
 }
 
 #[tauri::command]
@@ -160,6 +175,8 @@ pub fn run() {
             get_audio_hosts,
             start_audio_engine,
             stop_audio_engine,
+            set_input_channel,
+            get_input_channel,
             get_pedalboard,
             set_pedal_state,
             set_pedal_parameter,
