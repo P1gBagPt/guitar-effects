@@ -14,11 +14,12 @@ class AudioState {
   backingVolume = $state<number>(1.0);
   masterVolume = $state<number>(1.0);
 
-  // Transport
+  // Transport & Backing Track
   isPlaying = $state<boolean>(false);
   isRecording = $state<boolean>(false);
   playheadSeconds = $state<number>(0);
   durationSeconds = $state<number>(0);
+  backingTrackTitle = $state<string>('');
   bpm = $state<number>(120);
   metronomeEnabled = $state<boolean>(false);
 
@@ -84,6 +85,18 @@ class AudioState {
   async seek(seconds: number) {
     this.playheadSeconds = Math.max(0, seconds);
     await tauriApi.transportSeek(seconds);
+  }
+
+  async loadBackingTrack(name: string, filePath: string) {
+    try {
+      const dur = await tauriApi.loadBackingTrackFile(filePath);
+      this.durationSeconds = dur;
+      this.backingTrackTitle = name;
+      return dur;
+    } catch (err) {
+      console.error('Failed to load backing track:', err);
+      throw err;
+    }
   }
 
   async setVolumes(guitar: number, backing: number, master: number) {

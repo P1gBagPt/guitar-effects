@@ -128,8 +128,32 @@
     </div>
   </div>
 
-  <!-- Right: Input Monitoring Indicator -->
+  <!-- Right: Backing Track Loader & Input Monitoring Indicator -->
   <div class="transport-section right-section">
+    <!-- Backing Track Loader Button -->
+    <label class="backing-btn" title="Load Backing Track Audio (MP3, WAV, FLAC, OGG)">
+      <Disc size={15} />
+      <span>{audioState.backingTrackTitle ? audioState.backingTrackTitle.slice(0, 18) : 'Load Backing Track'}</span>
+      <input
+        type="file"
+        accept=".mp3,.wav,.flac,.ogg"
+        onchange={async (e) => {
+          const target = e.target as HTMLInputElement;
+          const file = target.files?.[0];
+          if (!file) return;
+          try {
+            // Note: In desktop Tauri apps, we pass the file path or name
+            // For webview File API, file.name is accessible
+            await audioState.loadBackingTrack(file.name, (file as any).path || file.name);
+          } catch (err: any) {
+            alert(`Failed to load backing track: ${err}`);
+          }
+          target.value = '';
+        }}
+        style="display: none;"
+      />
+    </label>
+
     <div class="monitor-tag">
       <Mic size={14} />
       <span>{audioState.selectedInput ? audioState.selectedInput.slice(0, 20) : 'Guitar DI'}</span>
@@ -324,6 +348,27 @@
     border-color: #f7a028;
     color: #f7a028;
     box-shadow: 0 0 8px rgba(247, 160, 40, 0.3);
+  }
+
+  .backing-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: #38bdf8;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .backing-btn:hover {
+    background: #0284c7;
+    color: #ffffff;
+    border-color: #38bdf8;
   }
 
   .monitor-tag {
