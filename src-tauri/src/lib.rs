@@ -99,6 +99,18 @@ fn load_backing_track_file(state: State<'_, AppState>, file_path: String) -> Res
 }
 
 #[tauri::command]
+fn load_backing_track_bytes(
+    state: State<'_, AppState>,
+    bytes: Vec<u8>,
+    extension: Option<String>,
+) -> Result<f64, String> {
+    let decoded = decoder::decode_audio_bytes(bytes, extension.as_deref(), 48000)?;
+    let duration = decoded.duration_seconds;
+    state.audio_engine.lock().load_backing_track(decoded);
+    Ok(duration)
+}
+
+#[tauri::command]
 fn start_recording_session(state: State<'_, AppState>, file_path: String) -> Result<(), String> {
     state.audio_engine.lock().start_recording(PathBuf::from(file_path))
 }
@@ -137,6 +149,7 @@ pub fn run() {
             transport_pause,
             transport_seek,
             load_backing_track_file,
+            load_backing_track_bytes,
             start_recording_session,
             stop_recording_session,
             import_tab_url

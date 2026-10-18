@@ -1,5 +1,6 @@
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use std::fs::File;
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use symphonia::core::audio::SampleBuffer;
@@ -18,13 +19,31 @@ pub struct DecodedAudio {
     pub duration_seconds: f64,
 }
 
+pub fn decode_audio_bytes(
+    bytes: Vec<u8>,
+    extension_hint: Option<&str>,
+    target_sample_rate: u32,
+) -> Result<DecodedAudio, String> {
+    let cursor = Cursor::new(bytes);
+    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+    decode_from_media_source_stream(mss, extension_hint, target_sample_rate)
+}
+
 pub fn decode_audio_file(file_path: &Path, target_sample_rate: u32) -> Result<DecodedAudio, String> {
     let src = File::open(file_path)
         .map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(src), Default::default());
+    let ext = file_path.extension().and_then(|e| e.to_str());
+    decode_from_media_source_stream(mss, ext, target_sample_rate)
+}
 
+fn decode_from_media_source_stream(
+    mss: MediaSourceStream,
+    extension_hint: Option<&str>,
+    target_sample_rate: u32,
+) -> Result<DecodedAudio, String> {
     let mut hint = Hint::new();
-    if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = extension_hint {
         hint.with_extension(ext);
     }
 

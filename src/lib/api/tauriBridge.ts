@@ -105,6 +105,13 @@ export const tauriApi = {
     return await invoke<number>('load_backing_track_file', { filePath });
   },
 
+  async loadBackingTrackBytes(bytes: number[] | Uint8Array, extension?: string): Promise<number> {
+    return await invoke<number>('load_backing_track_bytes', {
+      bytes: Array.from(bytes),
+      extension: extension ?? null,
+    });
+  },
+
   async startRecordingSession(filePath: string): Promise<void> {
     return await invoke('start_recording_session', { filePath });
   },

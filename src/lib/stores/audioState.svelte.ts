@@ -87,9 +87,18 @@ class AudioState {
     await tauriApi.transportSeek(seconds);
   }
 
-  async loadBackingTrack(name: string, filePath: string) {
+  async loadBackingTrack(name: string, source: string | ArrayBuffer) {
     try {
-      const dur = await tauriApi.loadBackingTrackFile(filePath);
+      let dur = 0;
+      if (typeof source === 'string' && source.includes('/') || (typeof source === 'string' && source.includes('\\'))) {
+        dur = await tauriApi.loadBackingTrackFile(source);
+      } else {
+        // In-memory ArrayBuffer from webview file picker
+        const buffer = source instanceof ArrayBuffer ? source : new ArrayBuffer(0);
+        const bytes = new Uint8Array(buffer);
+        const ext = name.split('.').pop()?.toLowerCase();
+        dur = await tauriApi.loadBackingTrackBytes(bytes, ext);
+      }
       this.durationSeconds = dur;
       this.backingTrackTitle = name;
       return dur;
