@@ -40,6 +40,11 @@ class AudioState {
         const defOut = this.hostInfo.output_devices.find((d) => d.is_default);
         if (defOut) this.selectedOutput = defOut.name;
       }
+      try {
+        await this.startEngine();
+      } catch (err) {
+        console.warn('Initial engine start will retry on transport play:', err);
+      }
       this.startTelemetryLoop();
     } catch (err) {
       console.warn('Backend not yet ready or running in browser preview:', err);
@@ -77,19 +82,39 @@ class AudioState {
       await tauriApi.transportPause();
       this.isPlaying = false;
     } else {
+      if (!this.isEngineRunning) {
+        try {
+          await this.startEngine();
+        } catch (e) {
+          console.error('Auto-start engine error:', e);
+        }
+      }
+      if (this.durationSeconds > 0 && this.playheadSeconds >= this.durationSeconds - 0.1) {
+        await this.seek(0);
+      }
       await tauriApi.transportPlay();
       this.isPlaying = true;
     }
   }
+
 
   async seek(seconds: number) {
     this.playheadSeconds = Math.max(0, seconds);
     await tauriApi.transportSeek(seconds);
   }
 
-  async loadBackingTrack(name: string, filePath: string) {
+  async loadBackingTrack(name: string, source: string | ArrayBuffer) {
     try {
-      const dur = await tauriApi.loadBackingTrackFile(filePath);
+      let dur = 0;
+      if (typeof source === 'string' && source.includes('/') || (typeof source === 'string' && source.includes('\\'))) {
+        dur = await tauriApi.loadBackingTrackFile(source);
+      } else {
+        // In-memory ArrayBuffer from webview file picker
+        const buffer = source instanceof ArrayBuffer ? source : new ArrayBuffer(0);
+        const bytes = new Uint8Array(buffer);
+        const ext = name.split('.').pop()?.toLowerCase();
+        dur = await tauriApi.loadBackingTrackBytes(bytes, ext);
+      }
       this.durationSeconds = dur;
       this.backingTrackTitle = name;
       return dur;

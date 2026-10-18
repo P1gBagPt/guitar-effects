@@ -181,6 +181,10 @@ impl AudioEngine {
         }
     }
 
+    pub fn get_sample_rate(&self) -> u32 {
+        self.sample_rate.load(Ordering::Relaxed) as u32
+    }
+
     pub fn start_engine(
         &mut self,
         input_device_name: Option<&str>,
@@ -190,62 +194,47 @@ impl AudioEngine {
     ) -> Result<(), String> {
         self.stop_engine();
 
-        let in_dev = self
-            .device_manager
-            .find_input_device(input_device_name)
-            .ok_or_else(|| "Failed to find audio input device".to_string())?;
-
+        // 1. Output device & stream configuration (REQUIRED)
         let out_dev = self
             .device_manager
             .find_output_device(output_device_name)
             .ok_or_else(|| "Failed to find audio output device".to_string())?;
 
-        let in_cfg = StreamConfig {
-            channels: 1, // Guitar DI mono
-            sample_rate: SampleRate(target_sample_rate),
-            buffer_size: BufferSize::Fixed(buffer_size_samples),
-        };
+        let default_out_cfg = out_dev
+            .default_output_config()
+            .map_err(|e| format!("Failed to get default output config: {}", e))?;
 
-        let out_cfg = StreamConfig {
-            channels: 2, // Stereo output
-            sample_rate: SampleRate(target_sample_rate),
-            buffer_size: BufferSize::Fixed(buffer_size_samples),
-        };
-
-        self.sample_rate.store(target_sample_rate as u64, Ordering::SeqCst);
-        self.pedal_chain.lock().prepare(target_sample_rate as f32, buffer_size_samples as usize);
-
-        // Lock-free input -> output communication ringbuffer
-        let (mut in_prod, mut out_cons) = create_audio_ringbuffer::<f32>(buffer_size_samples as usize * 16);
-
-        // Input stream callback
-        let in_peak_ref = self.input_peak.clone();
-        let in_rms_ref = self.input_rms.clone();
-
-        let in_stream = in_dev
-            .build_input_stream(
-                &in_cfg,
-                move |data: &[f32], _| {
-                    let mut peak = 0.0_f32;
-                    let mut sum_sq = 0.0_f32;
-
-                    for &sample in data {
-                        let abs = sample.abs();
-                        if abs > peak {
-                            peak = abs;
-                        }
-                        sum_sq += sample * sample;
-                        let _ = in_prod.push(sample);
+        let out_channels = default_out_cfg.channels();
+        // Check if device supports target_sample_rate; otherwise use default device sample rate
+        let out_cfg: StreamConfig = if target_sample_rate > 0 && target_sample_rate != default_out_cfg.sample_rate().0 {
+            let mut supported = false;
+            if let Ok(configs) = out_dev.supported_output_configs() {
+                for c in configs {
+                    if target_sample_rate >= c.min_sample_rate().0 && target_sample_rate <= c.max_sample_rate().0 {
+                        supported = true;
+                        break;
                     }
+                }
+            }
+            if supported {
+                StreamConfig {
+                    channels: out_channels,
+                    sample_rate: SampleRate(target_sample_rate),
+                    buffer_size: BufferSize::Default,
+                }
+            } else {
+                default_out_cfg.into()
+            }
+        } else {
+            default_out_cfg.into()
+        };
 
-                    let rms = (sum_sq / data.len().max(1) as f32).sqrt();
-                    in_peak_ref.store(peak, Ordering::Relaxed);
-                    in_rms_ref.store(rms, Ordering::Relaxed);
-                },
-                |err| log::error!("Audio input stream error: {}", err),
-                None,
-            )
-            .map_err(|e| format!("Failed to create input audio stream: {}", e))?;
+        let active_sr = out_cfg.sample_rate.0;
+        self.sample_rate.store(active_sr as u64, Ordering::SeqCst);
+        self.pedal_chain.lock().prepare(active_sr as f32, buffer_size_samples as usize);
+
+        // Ringbuffer for guitar DI signal
+        let (mut in_prod, mut out_cons) = create_audio_ringbuffer::<f32>(buffer_size_samples as usize * 16);
 
         // Output stream callback
         let pedal_chain_ref = self.pedal_chain.clone();
@@ -260,108 +249,160 @@ impl AudioEngine {
         let rec_prod_ref = self.rec_producer.clone();
         let dry_monitor_ref = self.dry_monitor.clone();
 
-        // Local processing buffer
+        let num_channels = out_cfg.channels as usize;
         let mut dsp_block = vec![0.0_f32; buffer_size_samples as usize * 2];
 
-        let out_stream = out_dev
-            .build_output_stream(
-                &out_cfg,
-                move |data: &mut [f32], _| {
-                    let num_frames = data.len() / 2;
-                    if dsp_block.len() < num_frames {
-                        dsp_block.resize(num_frames, 0.0);
+        let out_stream = out_dev.build_output_stream(
+            &out_cfg,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                let num_frames = data.len() / num_channels;
+                if dsp_block.len() < num_frames {
+                    dsp_block.resize(num_frames, 0.0);
+                }
+
+                // 1. Pull guitar samples from input ringbuffer
+                for i in 0..num_frames {
+                    dsp_block[i] = out_cons.pop().unwrap_or(0.0);
+                }
+
+                // 2. Process guitar signal through PedalChain
+                if !dry_monitor_ref.load(Ordering::Relaxed) {
+                    if let Some(mut chain) = pedal_chain_ref.try_lock() {
+                        chain.process(&mut dsp_block[..num_frames]);
                     }
+                }
 
-                    // 1. Pull guitar samples from ringbuffer
-                    for i in 0..num_frames {
-                        dsp_block[i] = out_cons.pop().unwrap_or(0.0);
-                    }
+                let g_vol = guitar_vol_ref.load(Ordering::Relaxed);
+                let b_vol = backing_vol_ref.load(Ordering::Relaxed);
+                let m_vol = master_vol_ref.load(Ordering::Relaxed);
 
-                    // 2. Process guitar signal through PedalChain
-                    if !dry_monitor_ref.load(Ordering::Relaxed) {
-                        if let Some(mut chain) = pedal_chain_ref.try_lock() {
-                            chain.process(&mut dsp_block[..num_frames]);
-                        }
-                    }
+                // 3. Mix Backing Track if playing
+                let is_playing = is_playing_ref.load(Ordering::Relaxed);
+                let current_frame = playhead_ref.load(Ordering::Relaxed);
+                let mut next_frame = current_frame;
 
-                    let g_vol = guitar_vol_ref.load(Ordering::Relaxed);
-                    let b_vol = backing_vol_ref.load(Ordering::Relaxed);
-                    let m_vol = master_vol_ref.load(Ordering::Relaxed);
+                let backing_guard = backing_audio_ref.try_lock();
+                let backing_samples = backing_guard
+                    .as_ref()
+                    .and_then(|g| g.as_ref().map(|b| &b.samples));
 
-                    // 3. Mix Backing Track if playing
-                    let is_playing = is_playing_ref.load(Ordering::Relaxed);
-                    let current_frame = playhead_ref.load(Ordering::Relaxed);
-                    let mut next_frame = current_frame;
+                let mut out_peak = 0.0_f32;
+                let mut out_sum_sq = 0.0_f32;
 
-                    let backing_guard = backing_audio_ref.try_lock();
-                    let backing_samples = backing_guard
-                        .as_ref()
-                        .and_then(|g| g.as_ref().map(|b| &b.samples));
+                let mut rec_guard = rec_prod_ref.try_lock();
 
-                    let mut out_peak = 0.0_f32;
-                    let mut out_sum_sq = 0.0_f32;
+                for i in 0..num_frames {
+                    let wet_guitar = dsp_block[i] * g_vol;
 
-                    let mut rec_guard = rec_prod_ref.try_lock();
-
-                    for i in 0..num_frames {
-                        let wet_guitar = dsp_block[i] * g_vol;
-
-                        let (b_left, b_right) = if is_playing {
-                            if let Some(backing) = backing_samples {
-                                let sample_idx = ((current_frame + i as u64) as usize) * 2;
-                                if sample_idx + 1 < backing.len() {
-                                    (backing[sample_idx] * b_vol, backing[sample_idx + 1] * b_vol)
-                                } else {
-                                    (0.0, 0.0)
-                                }
+                    let (b_left, b_right) = if is_playing {
+                        if let Some(backing) = backing_samples {
+                            let sample_idx = ((current_frame + i as u64) as usize) * 2;
+                            if sample_idx + 1 < backing.len() {
+                                (backing[sample_idx] * b_vol, backing[sample_idx + 1] * b_vol)
                             } else {
                                 (0.0, 0.0)
                             }
                         } else {
                             (0.0, 0.0)
-                        };
+                        }
+                    } else {
+                        (0.0, 0.0)
+                    };
 
-                        let left_out = ((wet_guitar + b_left) * m_vol).clamp(-1.0, 1.0);
-                        let right_out = ((wet_guitar + b_right) * m_vol).clamp(-1.0, 1.0);
+                    let left_out = ((wet_guitar + b_left) * m_vol).clamp(-1.0, 1.0);
+                    let right_out = ((wet_guitar + b_right) * m_vol).clamp(-1.0, 1.0);
 
-                        data[i * 2] = left_out;
-                        data[i * 2 + 1] = right_out;
+                    data[i * num_channels] = left_out;
+                    if num_channels > 1 {
+                        data[i * num_channels + 1] = right_out;
+                    }
+                    for ch in 2..num_channels {
+                        data[i * num_channels + ch] = 0.0;
+                    }
 
-                        // Telemetry metering
-                        let abs_l = left_out.abs();
-                        let abs_r = right_out.abs();
-                        if abs_l > out_peak { out_peak = abs_l; }
-                        if abs_r > out_peak { out_peak = abs_r; }
-                        out_sum_sq += left_out * left_out + right_out * right_out;
+                    // Telemetry metering
+                    let abs_l = left_out.abs();
+                    let abs_r = right_out.abs();
+                    if abs_l > out_peak { out_peak = abs_l; }
+                    if abs_r > out_peak { out_peak = abs_r; }
+                    out_sum_sq += left_out * left_out + right_out * right_out;
 
-                        // Recording path (lock-free push to disk worker)
-                        if let Some(ref mut guard) = rec_guard {
-                            if let Some(ref mut prod) = **guard {
-                                let _ = prod.push(left_out);
-                                let _ = prod.push(right_out);
-                            }
+                    // Recording path (lock-free push to disk worker)
+                    if let Some(ref mut guard) = rec_guard {
+                        if let Some(ref mut prod) = **guard {
+                            let _ = prod.push(left_out);
+                            let _ = prod.push(right_out);
                         }
                     }
+                }
 
-                    if is_playing {
-                        next_frame += num_frames as u64;
-                        playhead_ref.store(next_frame, Ordering::Relaxed);
-                    }
+                if is_playing {
+                    next_frame += num_frames as u64;
+                    playhead_ref.store(next_frame, Ordering::Relaxed);
+                }
 
-                    let out_rms = (out_sum_sq / (data.len().max(1) as f32)).sqrt();
-                    out_peak_ref.store(out_peak, Ordering::Relaxed);
-                    out_rms_ref.store(out_rms, Ordering::Relaxed);
-                },
-                |err| log::error!("Audio output stream error: {}", err),
-                None,
-            )
-            .map_err(|e| format!("Failed to create output audio stream: {}", e))?;
+                let out_rms = (out_sum_sq / (data.len().max(1) as f32)).sqrt();
+                out_peak_ref.store(out_peak, Ordering::Relaxed);
+                out_rms_ref.store(out_rms, Ordering::Relaxed);
+            },
+            |err| log::error!("Audio output stream error: {}", err),
+            None,
+        ).map_err(|e| format!("Failed to create output audio stream: {}", e))?;
 
-        in_stream.play().map_err(|e| format!("Failed to start input audio stream: {}", e))?;
         out_stream.play().map_err(|e| format!("Failed to start output audio stream: {}", e))?;
-
-        self.input_stream = Some(in_stream);
         self.output_stream = Some(out_stream);
+
+        // 2. Input stream setup (OPTIONAL / FAIL-SOFT)
+        // If no input device or permission denied, output and backing track still work perfectly!
+        if let Some(in_dev) = self.device_manager.find_input_device(input_device_name) {
+            if let Ok(default_in_cfg) = in_dev.default_input_config() {
+                let in_channels = default_in_cfg.channels() as usize;
+                let in_cfg = StreamConfig {
+                    channels: default_in_cfg.channels(),
+                    sample_rate: SampleRate(active_sr),
+                    buffer_size: BufferSize::Default,
+                };
+
+                let in_peak_ref = self.input_peak.clone();
+                let in_rms_ref = self.input_rms.clone();
+
+                match in_dev.build_input_stream(
+                    &in_cfg,
+                    move |data: &[f32], _| {
+                        let mut peak = 0.0_f32;
+                        let mut sum_sq = 0.0_f32;
+
+                        for frame in data.chunks(in_channels) {
+                            let sample = frame[0]; // Channel 1 (Guitar DI / Mono Left)
+                            let abs = sample.abs();
+                            if abs > peak {
+                                peak = abs;
+                            }
+                            sum_sq += sample * sample;
+                            let _ = in_prod.push(sample);
+                        }
+
+                        let frames_len = data.len() / in_channels.max(1);
+                        let rms = (sum_sq / frames_len.max(1) as f32).sqrt();
+                        in_peak_ref.store(peak, Ordering::Relaxed);
+                        in_rms_ref.store(rms, Ordering::Relaxed);
+                    },
+                    |err| log::warn!("Audio input stream notice: {}", err),
+                    None,
+                ) {
+                    Ok(stream) => {
+                        if let Err(e) = stream.play() {
+                            log::warn!("Could not start input stream: {}", e);
+                        } else {
+                            self.input_stream = Some(stream);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Input stream unavailable (guitar DI bypassed, backing output active): {}", e);
+                    }
+                }
+            }
+        }
 
         Ok(())
     }
@@ -371,3 +412,7 @@ impl AudioEngine {
         self.output_stream.take();
     }
 }
+
+
+
+

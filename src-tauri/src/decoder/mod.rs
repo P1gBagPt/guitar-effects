@@ -1,5 +1,5 @@
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 use std::fs::File;
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use symphonia::core::audio::SampleBuffer;
@@ -18,13 +18,31 @@ pub struct DecodedAudio {
     pub duration_seconds: f64,
 }
 
+pub fn decode_audio_bytes(
+    bytes: Vec<u8>,
+    extension_hint: Option<&str>,
+    target_sample_rate: u32,
+) -> Result<DecodedAudio, String> {
+    let cursor = Cursor::new(bytes);
+    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+    decode_from_media_source_stream(mss, extension_hint, target_sample_rate)
+}
+
 pub fn decode_audio_file(file_path: &Path, target_sample_rate: u32) -> Result<DecodedAudio, String> {
     let src = File::open(file_path)
         .map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(src), Default::default());
+    let ext = file_path.extension().and_then(|e| e.to_str());
+    decode_from_media_source_stream(mss, ext, target_sample_rate)
+}
 
+fn decode_from_media_source_stream(
+    mss: MediaSourceStream,
+    extension_hint: Option<&str>,
+    target_sample_rate: u32,
+) -> Result<DecodedAudio, String> {
     let mut hint = Hint::new();
-    if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = extension_hint {
         hint.with_extension(ext);
     }
 
@@ -131,41 +149,52 @@ fn resample_stereo_audio(
     from_rate: u32,
     to_rate: u32,
 ) -> Result<Vec<f32>, String> {
-    let num_frames = interleaved.len() / 2;
-    let mut left_in = Vec::with_capacity(num_frames);
-    let mut right_in = Vec::with_capacity(num_frames);
-
-    for chunk in interleaved.chunks_exact(2) {
-        left_in.push(chunk[0]);
-        right_in.push(chunk[1]);
+    if interleaved.is_empty() || interleaved.len() % 2 != 0 {
+        return Ok(Vec::new());
     }
 
-    let params = SincInterpolationParameters {
-        sinc_len: 64,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 128,
-        window: WindowFunction::BlackmanHarris2,
-    };
+    let channels = 2;
+    let num_input_frames = interleaved.len() / channels;
+    let ratio = (from_rate as f64) / (to_rate as f64);
 
-    let mut resampler = SincFixedIn::<f32>::new(
-        to_rate as f64 / from_rate as f64,
-        2.0,
-        params,
-        left_in.len(),
-        2,
-    ).map_err(|e| format!("Failed to create resampler: {}", e))?;
+    let num_output_frames = ((num_input_frames as f64) * (to_rate as f64 / from_rate as f64)) as usize;
+    let mut output = Vec::with_capacity(num_output_frames * channels);
 
-    let waves_in = vec![left_in, right_in];
-    let waves_out = resampler.process(&waves_in, None)
-        .map_err(|e| format!("Resampling error: {}", e))?;
+    let mut in_index_base: f64 = 0.0;
 
-    let out_len = waves_out[0].len();
-    let mut out_interleaved = Vec::with_capacity(out_len * 2);
-    for i in 0..out_len {
-        out_interleaved.push(waves_out[0][i]);
-        out_interleaved.push(waves_out[1][i]);
+    for _ in 0..num_output_frames {
+        let idx_int = in_index_base as usize;
+        let frac = (in_index_base - idx_int as f64) as f32;
+
+        if idx_int >= 1 && idx_int + 2 < num_input_frames {
+            for c in 0..channels {
+                let i0 = ((idx_int - 1) * channels) + c;
+                let i1 = (idx_int * channels) + c;
+                let i2 = ((idx_int + 1) * channels) + c;
+                let i3 = ((idx_int + 2) * channels) + c;
+
+                let y0 = interleaved[i0];
+                let y1 = interleaved[i1];
+                let y2 = interleaved[i2];
+                let y3 = interleaved[i3];
+
+                // 4-point, 3rd-order Hermite / Catmull-Rom spline
+                let c0 = y1;
+                let c1 = 0.5 * (y2 - y0);
+                let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+                let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
+
+                let sample = c0 + frac * (c1 + frac * (c2 + frac * c3));
+                output.push(sample);
+            }
+        } else {
+            let safe_idx = idx_int.clamp(0, num_input_frames - 1) * channels;
+            output.push(interleaved[safe_idx]);
+            output.push(interleaved[safe_idx + 1]);
+        }
+
+        in_index_base += ratio;
     }
 
-    Ok(out_interleaved)
+    Ok(output)
 }

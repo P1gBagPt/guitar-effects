@@ -142,9 +142,8 @@
           const file = target.files?.[0];
           if (!file) return;
           try {
-            // Note: In desktop Tauri apps, we pass the file path or name
-            // For webview File API, file.name is accessible
-            await audioState.loadBackingTrack(file.name, (file as any).path || file.name);
+            const buffer = await file.arrayBuffer();
+            await audioState.loadBackingTrack(file.name, buffer);
           } catch (err: any) {
             alert(`Failed to load backing track: ${err}`);
           }
