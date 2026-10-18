@@ -77,6 +77,13 @@ class AudioState {
       await tauriApi.transportPause();
       this.isPlaying = false;
     } else {
+      if (!this.isEngineRunning) {
+        try {
+          await this.startEngine();
+        } catch (e) {
+          console.error('Auto-start engine error:', e);
+        }
+      }
       await tauriApi.transportPlay();
       this.isPlaying = true;
     }
