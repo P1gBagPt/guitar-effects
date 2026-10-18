@@ -93,17 +93,16 @@
       <TabViewer />
 
       <!-- Horizontal Resizer Splitter Bar -->
-      <div
+      <button
+        type="button"
         class="resizer-horizontal"
         class:dragging={isDraggingVertical}
         onmousedown={startVerticalDrag}
-        role="separator"
-        aria-orientation="horizontal"
-        tabindex="0"
+        aria-label="Resize Tab Viewer and Pedalboard height"
         title="Drag up or down to resize Tab & Pedalboard"
       >
-        <div class="resizer-handle-pill"></div>
-      </div>
+        <span class="resizer-handle-pill"></span>
+      </button>
 
       <!-- Lower: Modular Pedalboard Rack with dynamic height -->
       <div class="pedalboard-wrapper" style="height: {pedalboardHeight}px;">
@@ -112,17 +111,16 @@
     </div>
 
     <!-- Vertical Resizer Splitter Bar between Stage & Mixer -->
-    <div
+    <button
+      type="button"
       class="resizer-vertical"
       class:dragging={isDraggingHorizontal}
       onmousedown={startHorizontalDrag}
-      role="separator"
-      aria-orientation="vertical"
-      tabindex="0"
+      aria-label="Resize Mixer Bus width"
       title="Drag left or right to resize Mixer Bus"
     >
-      <div class="resizer-handle-pill-v"></div>
-    </div>
+      <span class="resizer-handle-pill-v"></span>
+    </button>
 
     <!-- Right: Mixer Bus & Level Decibel Meters with dynamic width -->
     <div class="mixer-wrapper" style="width: {mixerWidth}px;">
@@ -165,6 +163,10 @@
   /* Horizontal Resizer between TabViewer and Pedalboard */
   .resizer-horizontal {
     height: 8px;
+    width: 100%;
+    padding: 0;
+    margin: 0;
+    border: none;
     background: #171920;
     border-top: 1px solid #282d38;
     border-bottom: 1px solid #282d38;
@@ -197,6 +199,10 @@
   /* Vertical Resizer between Center Stage and Mixer */
   .resizer-vertical {
     width: 8px;
+    height: 100%;
+    padding: 0;
+    margin: 0;
+    border: none;
     background: #171920;
     border-left: 1px solid #282d38;
     border-right: 1px solid #282d38;
