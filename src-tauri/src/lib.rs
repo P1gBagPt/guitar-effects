@@ -92,7 +92,11 @@ fn transport_seek(state: State<'_, AppState>, seconds: f64) {
 #[tauri::command]
 fn load_backing_track_file(state: State<'_, AppState>, file_path: String) -> Result<f64, String> {
     let path = Path::new(&file_path);
-    let decoded = decoder::decode_audio_file(path, 48000)?;
+    let target_sr = {
+        let sr = state.audio_engine.lock().get_sample_rate();
+        if sr > 0 { sr } else { 48000 }
+    };
+    let decoded = decoder::decode_audio_file(path, target_sr)?;
     let duration = decoded.duration_seconds;
     state.audio_engine.lock().load_backing_track(decoded);
     Ok(duration)
@@ -101,14 +105,31 @@ fn load_backing_track_file(state: State<'_, AppState>, file_path: String) -> Res
 #[tauri::command]
 fn load_backing_track_bytes(
     state: State<'_, AppState>,
-    bytes: Vec<u8>,
+    bytes: Option<Vec<u8>>,
+    base64_data: Option<String>,
     extension: Option<String>,
 ) -> Result<f64, String> {
-    let decoded = decoder::decode_audio_bytes(bytes, extension.as_deref(), 48000)?;
+    use base64::Engine;
+    let raw_bytes = if let Some(b64) = base64_data {
+        base64::prelude::BASE64_STANDARD
+            .decode(b64.as_bytes())
+            .map_err(|e| format!("Base64 decode failed: {}", e))?
+    } else if let Some(b) = bytes {
+        b
+    } else {
+        return Err("No audio data provided".to_string());
+    };
+
+    let target_sr = {
+        let sr = state.audio_engine.lock().get_sample_rate();
+        if sr > 0 { sr } else { 48000 }
+    };
+    let decoded = decoder::decode_audio_bytes(raw_bytes, extension.as_deref(), target_sr)?;
     let duration = decoded.duration_seconds;
     state.audio_engine.lock().load_backing_track(decoded);
     Ok(duration)
 }
+
 
 #[tauri::command]
 fn start_recording_session(state: State<'_, AppState>, file_path: String) -> Result<(), String> {

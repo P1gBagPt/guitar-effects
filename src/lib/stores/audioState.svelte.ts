@@ -40,6 +40,11 @@ class AudioState {
         const defOut = this.hostInfo.output_devices.find((d) => d.is_default);
         if (defOut) this.selectedOutput = defOut.name;
       }
+      try {
+        await this.startEngine();
+      } catch (err) {
+        console.warn('Initial engine start will retry on transport play:', err);
+      }
       this.startTelemetryLoop();
     } catch (err) {
       console.warn('Backend not yet ready or running in browser preview:', err);
@@ -84,10 +89,14 @@ class AudioState {
           console.error('Auto-start engine error:', e);
         }
       }
+      if (this.durationSeconds > 0 && this.playheadSeconds >= this.durationSeconds - 0.1) {
+        await this.seek(0);
+      }
       await tauriApi.transportPlay();
       this.isPlaying = true;
     }
   }
+
 
   async seek(seconds: number) {
     this.playheadSeconds = Math.max(0, seconds);
