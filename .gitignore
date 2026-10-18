@@ -1,0 +1,32 @@
+# Dependencies & Package Managers
+node_modules/
+package-lock.json
+
+# Build Outputs
+dist/
+dist-ssr/
+*.local
+
+# Tauri & Rust Builds
+src-tauri/target/
+src-tauri/gen/schemas/
+target/
+
+# Logs & Temporary Files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.log
+
+# Editor & OS Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
