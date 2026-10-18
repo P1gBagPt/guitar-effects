@@ -1,6 +1,6 @@
 <script lang="ts">
   import { audioState } from '../stores/audioState.svelte';
-  import { Play, Pause, Square, Circle, Settings2, Music, Volume2, Mic } from 'lucide-svelte';
+  import { Play, Pause, Square, Circle, Settings2, Music, Volume2, Mic, Disc } from 'lucide-svelte';
 
   let { onOpenSettings = () => {} } = $props<{ onOpenSettings?: () => void }>();
 
